@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Игра-поздравление</title>
+  <style>
+    :root {
+      --blue: #1e62ff;
+      --shadow: rgba(0,0,0,.2);
+    }
+    html, body {
+      margin: 0; padding: 0; height: 100%; background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Ubuntu, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+      color: #0b0b0b;
+      -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
+      touch-action: none;
+    }
+    #game {
+      position: relative; width: 100vw; height: 100vh; overflow: hidden; background: #87d2ff;
+    }
+    canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+    /* UI */
+    .hud { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; justify-content: space-between; align-items: center; z-index: 5; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,.6); }
+    .hud .score { font-weight: 700; font-size: 18px; }
+
+    .cloud { position: absolute; left: 50%; top: 12%; transform: translate(-50%, -50%); z-index: 10; display: none; align-items: center; justify-content: center; text-align: center; padding: 12px 18px; }
+    .cloud img { max-width: min(90vw, 720px); width: 90vw; height: auto; filter: drop-shadow(0 8px 16px var(--shadow)); }
+    .cloud .text { position: absolute; color: var(--blue); font-weight: 800; font-size: min(5vw, 28px); line-height: 1.25; padding: 0 22px; }
+
+    .center { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; z-index: 12; }
+    .modal { background: #ffffff; color: #0b0b0b; padding: 18px 16px; border-radius: 14px; max-width: 680px; width: calc(100% - 32px); box-shadow: 0 12px 32px rgba(0,0,0,.35); text-align: center; }
+    .modal h2 { margin: 0 0 10px; font-size: 22px; }
+    .modal p { margin: 8px 0; }
+    .row { margin-top: 14px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    button { cursor: pointer; background: var(--blue); color: #fff; border: 0; border-radius: 10px; font-weight: 700; padding: 10px 16px; font-size: 16px; box-shadow: 0 6px 14px rgba(30,98,255,.35); }
+    button.secondary { background: #e9efff; color: #0b3bff; box-shadow: none; }
+
+    /* Fireworks layer */
+    #fx { position: absolute; inset: 0; pointer-events: none; z-index: 11; }
+  </style>
+</head>
+<body>
+  <div id="game">
+    <!-- Background and game rendering on canvases -->
+    <canvas id="bg"></canvas>
+    <canvas id="play"></canvas>
+    <canvas id="fx"></canvas>
+
+    <div class="hud">
+      <div class="score">Подарков поймано: <span id="score">0</span> / 100</div>
+    </div>
+
+    <!-- Cloud message -->
+    <div id="cloud" class="cloud">
+      <img id="cloudImg" alt="cloud" />
+      <div id="cloudText" class="text"></div>
+    </div>
+
+    <!-- Final modal -->
+    <div id="final" class="center">
+      <div class="modal">
+        <h2>С днём рождения! 🎉</h2>
+        <p>Внутренней гармонии, искренних людей рядом и красивых мечтаний, которые обязательно станут планами и сбудутся!!!</p>
+        <div class="row"><button id="finishBtn">Завершить</button></div>
+      </div>
+    </div>
+
+  </div>
+  <audio id="catchSnd" preload="auto"></audio>
+  <audio id="bdaySnd" preload="auto"></audio>
+
+  <script>
+    // Asset URLs from uploads (in this workspace they are next to the HTML)
+    const ASSETS = {
+      bg: 'рисунок1.png', // background scene
+      hero: 'рисунок2.png', // heroine sprite (back view)
+      cloud: 'рисунок3.png', // speech bubble cloud
+      catch: 'звук1.mp3', // sound on catch
+      birthday: 'звук2.mp3' // final music
+    };
+
+    // Game constants
+    const TOTAL_GIFTS = 100;
+    const START_FALL_TIME = 3500; // ms for one gift fall
+    const ACCEL_PER_GIFT = -10;   // each next gift faster by 0.01s => -10 ms
+    const GIFT_EMOJI = '🎁';
+
+    const MILESTONES = [
+      { n: 10, text: 'Пусть всё задуманное сбывается легко!' },
+      { n: 20, text: 'Пусть жизнь щедро дарит яркие эмоции!' },
+      { n: 30, text: 'Пусть отдых приходит чаще, чем понедельники! Улыбок, комплиментов и чудесных событий!' },
+      { n: 35, text: 'О!, поздравляем… статус “Мать Дракона”' },
+      { n: 37, text: 'С днём рождения! Внутренней гармонии, искренних людей рядом и красивых мечтаний, которые обязательно станут планами и сбудутся!!!', final: true }
+    ];
+
+    const game = {
+      running: true,
+      paused: false,
+      caught: 0,
+      dropped: 0,
+      giftFallMs: START_FALL_TIME,
+      heroX: 0.5, // 0..1 screen width
+      touchId: null,
+      width: 0, height: 0,
+      gift: null,
+      timers: new Set(),
+    };
+
+    // Canvas setup
+    const bg = document.getElementById('bg');
+    const play = document.getElementById('play');
+    const fx = document.getElementById('fx');
+    const bctx = bg.getContext('2d');
+    const pctx = play.getContext('2d');
+    const fctx = fx.getContext('2d');
+
+    const scoreEl = document.getElementById('score');
+    const cloud = document.getElementById('cloud');
+    const cloudImg = document.getElementById('cloudImg');
+    const cloudText = document.getElementById('cloudText');
+    const finalModal = document.getElementById('final');
+    const finishBtn = document.getElementById('finishBtn');
+
+    const catchSnd = document.getElementById('catchSnd');
+    const bdaySnd = document.getElementById('bdaySnd');
+
+    // Load media
+    cloudImg.src = ASSETS.cloud;
+    catchSnd.src = ASSETS.catch;
+    bdaySnd.src = ASSETS.birthday;
+
+    const bgImg = new Image(); bgImg.src = ASSETS.bg;
+    const heroImg = new Image(); heroImg.src = ASSETS.hero;
+
+    function resize() {
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const w = bg.clientWidth = play.clientWidth = fx.clientWidth = document.getElementById('game').clientWidth;
+      const h = bg.clientHeight = play.clientHeight = fx.clientHeight = document.getElementById('game').clientHeight;
+      [bg, play, fx].forEach(c => { c.width = Math.floor(w * dpr); c.height = Math.floor(h * dpr); c.style.width = w + 'px'; c.style.height = h + 'px'; c.getContext('2d').setTransform(dpr,0,0,dpr,0,0); });
+      game.width = w; game.height = h;
+      drawBackground();
+    }
+
+    function drawBackground() {
+      bctx.clearRect(0,0,game.width, game.height);
+      if (bgImg.complete && bgImg.naturalWidth) {
+        // Cover
+        const iw = bgImg.naturalWidth, ih = bgImg.naturalHeight;
+        const r = Math.max(game.width/iw, game.height/ih);
+        const dw = iw*r, dh = ih*r;
+        const dx = (game.width - dw)/2, dy = (game.height - dh)/2;
+        bctx.drawImage(bgImg, dx, dy, dw, dh);
+      } else {
+        const g = bctx.createLinearGradient(0,0,0,game.height);
+        g.addColorStop(0,'#7cc9ff'); g.addColorStop(1,'#ffe08a');
+        bctx.fillStyle = g; bctx.fillRect(0,0,game.width, game.height);
+      }
+    }
+
+    function spawnGift() {
+      if (!game.running || game.paused) return;
+      if (game.dropped >= TOTAL_GIFTS) return endGameIfNeeded();
+      game.dropped++;
+      const size = Math.max(28, Math.min(64, game.width * 0.08));
+      const x = Math.random() * (game.width - size) + size/2;
+      const startY = -size;
+      const endY = game.height - Math.max(game.height*0.18, 120); // top of floor area where hero stands
+      const startTime = performance.now();
+      const duration = Math.max(700, game.giftFallMs);
+      const gift = { x, y: startY, size, startTime, duration, endY, caught: false, over: false };
+      game.gift = gift;
+      // schedule next spawn after this one resolves (since only one on screen)
+    }
+
+    function updatePlay() {
+      pctx.clearRect(0,0,game.width, game.height);
+      // Draw gift
+      const g = game.gift;
+      if (g && !g.over) {
+        const t = Math.min(1, (performance.now() - g.startTime) / g.duration);
+        g.y = g.y = g.y = g.y, g.y = g.y; // noop keep var referenced
+        const y = g.y = g.startY ? g.startY + (g.endY - g.startY) * t : (-g.size) + (g.endY + g.size) * t;
+        pctx.font = `${Math.floor(g.size)}px sans-serif`;
+        pctx.textAlign = 'center'; pctx.textBaseline = 'middle';
+        pctx.fillText(GIFT_EMOJI, g.x, y);
+        // collision with hero bucket area
+        const hero = drawHero(true);
+        if (!g.caught && y >= hero.catchY && Math.abs(g.x - hero.centerX) < hero.catchW/2) {
+          g.caught = true; g.over = true; game.caught++;
+          scoreEl.textContent = game.caught;
+          safePlay(catchSnd);
+          showMilestoneIfAny();
+          scheduleNextGift();
+        } else if (t >= 1 && !g.caught) {
+          g.over = true;
+          scheduleNextGift();
+        }
+      } else {
+        drawHero(true);
+      }
+    }
+
+    function drawHero(draw = true) {
+      const floorH = Math.max(game.height*0.24, 140);
+      const heroH = Math.min(game.height*0.7, 0.78*game.height);
+      const scale = 0.5 * Math.min( heroH / 300, game.width / 240 );
+      const h = 300 * scale;
+      const w = 200 * scale;
+      const x = game.heroX * (game.width - w);
+      const y = game.height - h - Math.max(20, floorH*0.1);
+      if (draw) {
+        if (heroImg.complete && heroImg.naturalWidth) {
+          pctx.drawImage(heroImg, x, y, w, h);
+        } else {
+          pctx.fillStyle = '#2b6cb0'; pctx.fillRect(x, y, w, h);
+        }
+      }
+      // Catch zone around raised hands near top of sprite
+      const catchW = w * 0.6;
+      const catchY = y + h*0.18; // roughly hand level
+      const centerX = x + w/2;
+      return { centerX, catchW, catchY };
+    }
+
+    function scheduleNextGift() {
+      // Adjust speed for next gift
+      game.giftFallMs = Math.max(300, game.giftFallMs + ACCEL_PER_GIFT);
+      if (game.dropped >= TOTAL_GIFTS) {
+        endGameIfNeeded();
+        return;
+      }
+      if (!game.running) return;
+      if (!game.paused) {
+        // small delay so next gift starts right after previous resolved
+        const id = setTimeout(spawnGift, 250);
+        game.timers.add(id);
+      }
+    }
+
+    function showCloud(text, ms=5000) {
+      cloudText.textContent = text;
+      cloud.style.display = 'flex';
+      // ensure cloud image visible
+      cloudImg.src = ASSETS.cloud;
+      game.paused = true;
+      const id = setTimeout(() => {
+        cloud.style.display = 'none';
+        game.paused = false;
+        // continue with next gift if none active
+        if (!game.gift || game.gift.over) scheduleNextGift();
+      }, ms);
+      game.timers.add(id);
+    }
+
+    function showMilestoneIfAny() {
+      const m = MILESTONES.find(x => x.n === game.caught);
+      if (!m) return;
+      if (m.final) {
+        // Final celebration
+        game.paused = true;
+        fireworksStart();
+        safePlay(bdaySnd, true);
+        showCloud(m.text, 5000);
+        // after 5s cloud, keep fireworks + then after 30s show continuation message + stop
+        const id1 = setTimeout(() => {
+          fireworksStop();
+          finalStopAndMessage();
+        }, 35000); // 5s cloud + 30s
+        game.timers.add(id1);
+      } else {
+        showCloud(m.text, 5000);
+      }
+    }
+
+    function endGameIfNeeded() {
+      if (!game.running) return;
+      if (game.caught <= 9) {
+        showCloud('Ну и нечего отвлекаться на всякие игрушки — нужно наслаждаться жизнью 😊😊😊', 5000);
+      }
+      game.running = false;
+    }
+
+    function finalStopAndMessage() {
+      game.running = false; game.paused = true;
+      finalModal.style.display = 'flex';
+      // Show additional line about continuation date
+      const p = document.createElement('p');
+      p.textContent = 'продолжение выйдет 14.08.2026';
+      finalModal.querySelector('.modal').insertBefore(p, finalModal.querySelector('.row'));
+    }
+
+    finishBtn.addEventListener('click', () => {
+      // Simple end screen close / reload suggestion
+      window.close();
+      // If window cannot close (mobile/WhatsApp), fallback to hiding
+      finalModal.style.display = 'none';
+    });
+
+    // Input: user drags her finger at bottom to move heroine horizontally
+    function handlePointerDown(e){
+      if (game.touchId !== null) return;
+      const p = pointer(e); game.touchId = p.id; moveHeroTo(p.x);
+    }
+    function handlePointerMove(e){
+      const p = pointer(e); if (game.touchId !== null && p.id === game.touchId) moveHeroTo(p.x);
+    }
+    function handlePointerUp(e){
+      const p = pointer(e); if (p.id === game.touchId) game.touchId = null;
+    }
+    function pointer(e){
+      let id = 0, x=0;
+      if (e.touches && e.touches[0]) { id = e.touches[0].identifier; x = e.touches[0].clientX; }
+      else if (e.changedTouches && e.changedTouches[0]) { id = e.changedTouches[0].identifier; x = e.changedTouches[0].clientX; }
+      else { id = 1; x = e.clientX; }
+      return { id, x };
+    }
+    function moveHeroTo(px){
+      const rect = play.getBoundingClientRect();
+      const rel = (px - rect.left) / rect.width;
+      game.heroX = Math.min(1, Math.max(0, rel));
+    }
+
+    // Animation loop
+    function loop(){
+      updatePlay();
+      requestAnimationFrame(loop);
+    }
+
+    function safePlay(audio, loop=false){
+      try { audio.loop = !!loop; audio.currentTime = 0; audio.play().catch(()=>{}); } catch(e) {}
+    }
+
+    // Simple fireworks on fx canvas
+    let fwTimer = null; const particles = [];
+    function fireworksStart(){
+      if (fwTimer) return; particles.length = 0;
+      const spawn = ()=>{
+        const cx = Math.random()*game.width*0.8 + game.width*0.1;
+        const cy = Math.random()*game.height*0.4 + game.height*0.15;
+        const colors = ['#ff4b4b','#ffd93d','#4cf3ff','#b86bff','#6bff8e'];
+        for(let i=0;i<70;i++){
+          const a = Math.random()*Math.PI*2;
+          const sp = 1 + Math.random()*3.2;
+          particles.push({x:cx,y:cy,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:60,color:colors[i%colors.length]});
+        }
+      };
+      fwTimer = setInterval(spawn, 600);
+      const tick = ()=>{
+        fctx.clearRect(0,0,game.width, game.height);
+        for(let i=particles.length-1;i>=0;i--){
+          const p = particles[i];
+          p.x += p.vx; p.y += p.vy; p.vy += 0.02; p.life--; 
+          fctx.fillStyle = p.color; fctx.globalAlpha = Math.max(0, p.life/60);
+          fctx.beginPath(); fctx.arc(p.x,p.y,2,0,Math.PI*2); fctx.fill(); fctx.globalAlpha = 1;
+          if (p.life<=0) particles.splice(i,1);
+        }
+        if (fwTimer) requestAnimationFrame(tick);
+      };
+      tick(); spawn();
+    }
+    function fireworksStop(){ if (fwTimer){ clearInterval(fwTimer); fwTimer = null; } fctx.clearRect(0,0,game.width, game.height); particles.length = 0; }
+
+    // Start
+    window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', resize);
+
+    play.addEventListener('mousedown', handlePointerDown);
+    play.addEventListener('mousemove', handlePointerMove);
+    window.addEventListener('mouseup', handlePointerUp);
+
+    play.addEventListener('touchstart', handlePointerDown, {passive:true});
+    play.addEventListener('touchmove', handlePointerMove, {passive:true});
+    window.addEventListener('touchend', handlePointerUp);
+
+    // init after images
+    Promise.all([
+      new Promise(r=>{ if (bgImg.complete) r(); else bgImg.onload=r; }),
+      new Promise(r=>{ if (heroImg.complete) r(); else heroImg.onload=r; })
+    ]).then(()=>{
+      resize();
+      drawBackground();
+      spawnGift();
+      loop();
+    });
+  </script>
+</body>
+</html>
